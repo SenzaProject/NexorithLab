@@ -1,0 +1,14 @@
+// Konfigurasi proyek Nexorith Lab ("Gradle-lite").
+// Yang dibaca hanya: minSdk, targetSdk, dan daftar dependencies.
+// Tambahkan library lewat layar Dependencies, atau tulis di sini.
+android {
+    defaultConfig {
+        minSdk 26
+        targetSdk 28
+    }
+}
+
+dependencies {
+    // Contoh (hapus tanda // di depan untuk memakai):
+    // implementation 'androidx.appcompat:appcompat:1.6.1'
+}

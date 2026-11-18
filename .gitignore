@@ -1,7 +1,7 @@
+build/
 .gradle/
-/build/
-/app/build/
 local.properties
-.idea/
 *.iml
-*.zip
+.idea/
+app/src/main/assets/android.jar
+app/src/main/assets/debug.p12
