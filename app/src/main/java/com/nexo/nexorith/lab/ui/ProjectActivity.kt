@@ -3,6 +3,10 @@ package com.nexo.nexorith.lab.ui
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.graphics.Typeface
 import android.os.Bundle
 import android.text.Editable
@@ -20,12 +24,16 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import com.nexo.nexorith.lab.build.BuildService
 import com.nexo.nexorith.lab.build.BuildState
+import com.nexo.nexorith.lab.project.AssetImporter
+import com.nexo.nexorith.lab.project.IconGenerator
 import java.io.File
 
 class ProjectActivity : Activity() {
 
     companion object {
         const val EXTRA_PATH = "path"
+        private const val REQ_ASSET = 101
+        private const val REQ_ICON = 102
     }
 
     private lateinit var dir: File
@@ -40,6 +48,8 @@ class ProjectActivity : Activity() {
     private var current: File? = null
     private var dirty = false
     private var loading = false
+    private var pendingCategory: AssetImporter.Category? = null
+    private var pendingBackground = "#FFFFFF"
 
     private val stateListener: (BuildState.Snapshot) -> Unit = { s -> runOnUiThread { renderStatus(s) } }
     private val logListener: (String) -> Unit = { line -> runOnUiThread { appendLog(line) } }
@@ -82,6 +92,12 @@ class ProjectActivity : Activity() {
         barButton("Build") { startBuild() }
         barButton("Batal") { cancelBuild() }
         root.addView(bar)
+
+        val bar2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val bar2Params = { LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(dp(2), dp(4), dp(2), 0) } }
+        bar2.addView(actionButton("Impor aset") { chooseAssetCategory() }, bar2Params())
+        bar2.addView(actionButton("Buat ikon") { askIconBackground() }, bar2Params())
+        root.addView(bar2)
 
         adapter = object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, ArrayList()) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
@@ -277,6 +293,119 @@ class ProjectActivity : Activity() {
             return
         }
         startService(Intent(this, BuildService::class.java).setAction(BuildService.ACTION_CANCEL))
+    }
+
+    private fun chooseAssetCategory() {
+        val categories = AssetImporter.Category.values()
+        AlertDialog.Builder(this)
+            .setTitle("Impor sebagai")
+            .setItems(categories.map { it.label }.toTypedArray()) { _, i ->
+                pendingCategory = categories[i]
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("*/*")
+                    .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                startActivityForResult(intent, REQ_ASSET)
+            }
+            .show()
+    }
+
+    private fun askIconBackground() {
+        val input = EditText(this).apply {
+            hint = "#RRGGBB"
+            setText(pendingBackground)
+            setSingleLine()
+        }
+        val box = LinearLayout(this).apply {
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(input, LinearLayout.LayoutParams(MATCH, WRAP))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Warna latar ikon")
+            .setMessage("Dipakai sebagai latar adaptive icon dan ikon lama.")
+            .setView(box)
+            .setPositiveButton("Pilih gambar") { _, _ ->
+                val hex = input.text.toString().trim()
+                if (!IconGenerator.isValidColor(hex)) {
+                    toast("Warna harus berformat #RRGGBB")
+                } else {
+                    pendingBackground = hex
+                    val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                        .addCategory(Intent.CATEGORY_OPENABLE)
+                        .setType("image/*")
+                    startActivityForResult(intent, REQ_ICON)
+                }
+            }
+            .setNegativeButton("Batal", null)
+            .show()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK || data == null) return
+        when (requestCode) {
+            REQ_ASSET -> importAssets(data)
+            REQ_ICON -> data.data?.let { generateIcons(it) }
+        }
+    }
+
+    private fun importAssets(data: Intent) {
+        val category = pendingCategory
+        if (category == null) {
+            toast("Pilih kategori impor lagi")
+            return
+        }
+        val uris = ArrayList<Uri>()
+        data.data?.let { uris.add(it) }
+        data.clipData?.let { clip ->
+            for (i in 0 until clip.itemCount) uris.add(clip.getItemAt(i).uri)
+        }
+        Thread {
+            val results = uris.distinct().map { uri ->
+                AssetImporter.import(contentResolver, uri, displayName(uri), dir, category)
+            }
+            runOnUiThread {
+                refreshFiles()
+                val failure = results.firstOrNull { it.isFailure }?.exceptionOrNull()?.message
+                toast("${results.count { it.isSuccess }} file diimpor" + (failure?.let { ", gagal: $it" } ?: ""))
+            }
+        }.start()
+    }
+
+    private fun generateIcons(uri: Uri) {
+        val background = pendingBackground
+        Thread {
+            val result = runCatching {
+                val bitmap = decodeScaled(uri) ?: error("Gambar tidak bisa dibaca")
+                IconGenerator.generate(bitmap, dir, background)
+            }
+            runOnUiThread {
+                refreshFiles()
+                result
+                    .onSuccess { toast("Ikon dibuat di res/mipmap-*") }
+                    .onFailure { toast(it.message ?: "Gagal membuat ikon") }
+            }
+        }.start()
+    }
+
+    private fun displayName(uri: Uri): String {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                val name = c.getString(0)
+                if (!name.isNullOrEmpty()) return name
+            }
+        }
+        return uri.lastPathSegment ?: "file"
+    }
+
+    private fun decodeScaled(uri: Uri): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        var sample = 1
+        while (bounds.outWidth / sample > 2048 || bounds.outHeight / sample > 2048) sample *= 2
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        return contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
     }
 
     private fun renderStatus(s: BuildState.Snapshot) {
